@@ -55,11 +55,15 @@ while arm.connected and arm.state != 4:
         angles = [i, 0, 0, 0, 0, 0, 0]
         ret = arm.set_servo_angle_j(angles)
         print('set_servo_angle_j, ret={}'.format(ret))
+        state = arm.get_joint_states()[1]
+        print(state[1][0],state[1][1],state[1][2],state[1][3],state[1][4],state[1][5])
         time.sleep(0.01)
     for i in range(100):
         angles = [100-i, 0, 0, 0, 0, 0, 0]
         ret = arm.set_servo_angle_j(angles)
         print('set_servo_angle_j, ret={}'.format(ret))
+        state = arm.get_joint_states()[1]
+        print(state[1][0],state[1][1],state[1][2],state[1][3],state[1][4],state[1][5])
         time.sleep(0.01)
 
 arm.disconnect()
