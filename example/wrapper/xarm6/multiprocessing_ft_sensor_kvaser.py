@@ -5,7 +5,9 @@ from trajectory_generate import Trajectory
 import time
 import os
 import sys
+import can
 import numpy as np
+import matplotlib.pyplot as plt
 import modern_robotics as mr
 
 from multiprocessing import Process, Manager
@@ -43,20 +45,79 @@ else:
 manager = Manager()
 _q = manager.dict()
 _q_d = manager.dict()
+_F = manager.dict()
 
 _q['q'] = [0.0]*9; _q['q_dot'] = [0.0]*9; _q['trq_g'] = [0.0]*9; _q['mpc_q']=[0.0]*9; _q['mpc_q_dot']=[0.0]*9;
 _q['trq_ext'] = [0.0]*6;
 _q_d['qd'] = [0.0]*9; _q_d['qd_dot'] = [0.0]*9; _q_d['qd_ddot'] = [0.0]*9;
+_F['force'] = [0.0]*3; _F['torque'] = [0.0]*3;
 
-def ft_Sensor_run():
-    pass
+def ft_sensor_run():
+    init_time=time.time()
+    DF=50; DT=2000
+    RFT_frq=1000
+    channel = 0
+    
+    bus = can.interface.Bus(bustype = 'kvaser', channel = 0, bitrate = 1000000)
+
+    # Set filter
+    tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x08, 0x01, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01])
+    bus.send(tx_message, timeout = 0.5)
+    bus.recv()
+
+    tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x11, 0x01, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01])
+    bus.send(tx_message, timeout = 0.5)
+    bus.recv()
+    
+    while True:
+        g_time = time.time()
+        # read once
+        tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x0A, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01])
+        bus.send(tx_message, timeout = 0.5)
+
+        rx_message_1 = bus.recv()
+        rx_message_2 = bus.recv()
+        fx = ((rx_message_1.data[1]<<8) + rx_message_1.data[2])
+        signed_fx = (-(fx & 0x8000) | (fx&0x7fff))/DF
+        #x.append(signed_fx)
+        fy = ((rx_message_1.data[3]<<8) + rx_message_1.data[4])
+        signed_fy = (-(fy & 0x8000) | (fy&0x7fff))/DF
+        #y.append(signed_fy)
+        fz = ((rx_message_1.data[5]<<8) + rx_message_1.data[6])
+        signed_fz = (-(fz & 0x8000) | (fz&0x7fff))/DF
+        print(signed_fz)
+        
+        tx = ((rx_message_1.data[7]<<8) + rx_message_2.data[0])
+        signed_tx = (-(tx & 0x8000) | (tx&0x7fff))/DT
+        #x.append(signed_fx)
+        ty = ((rx_message_2.data[1]<<8) + rx_message_2.data[2])
+        signed_ty = (-(ty & 0x8000) | (ty&0x7fff))/DT
+        #y.append(signed_fy)
+        tz = ((rx_message_2.data[3]<<8) + rx_message_2.data[4])
+        signed_tz = (-(tz & 0x8000) | (tz&0x7fff))/DT
+        print(signed_tz)
+        
+        #z.append(signed_fz)
+        #ax.plot(t, x, color = 'r')
+        #ax.plot(t, y, color = 'g')
+        #ax.plot(t, z, color = 'b')
+    
+        #fig.canvas.draw()
+        #ax.set_xlim(left = max(0, i-0.25), right = i+0.25)
+        
+        i += 1/RFT_frq
+        while time.time()-g_time<(1/RFT_frq):
+            time.sleep(1/1000000)
+            glob_time_buf=time.time()
+            init_time_buf=init_time
+        print(time.time()-g_time)
 
 def xarm6_cmd_run():
     deg2rad = 3.141592/180
     rad2deg = 180/3.141592
     xarm6_frq = 1000
     
-    xarm6_mode = 4 #2 #       2: teaching mode, 4: joint velocity control
+    xarm6_mode = 2 #4 #       2: teaching mode, 4: joint velocity control
 
     init_time=time.time()
     
@@ -184,7 +245,7 @@ def xarm6_cmd_run():
             
         for i in range(6):
             if traj_flag[i]==1:
-                traj.SetPolynomial5th(i,q[i],target_q[i],g_time,2)
+                traj.SetPolynomial5th(i,q[i],target_q[i],g_time,3.0)
                 qd[i]=q[i]
                 traj_flag[i]=2
 
@@ -211,8 +272,8 @@ def xarm6_cmd_run():
             elif i == 5:
                 cmd_vel[i] = 15*(qd[i]-q[i])+1*(qd_dot[i]-q_dot[i])
         #print(qd)
-        print(q)
-        print(cmd_vel)
+        #print(q)
+        #print(cmd_vel)
         
         if xarm6_mode == 4:
             arm.vc_set_joint_velocity(cmd_vel)
@@ -222,20 +283,26 @@ def xarm6_cmd_run():
             time.sleep(1/1000000)
             glob_time_buf=time.time()
             init_time_buf=init_time
-        print(time.time()-g_time)
+        #print(time.time()-g_time)
         
 if __name__=='__main__':
 
     xarm6_cmd_task = Process(target=xarm6_cmd_run, args=())
-    ft_sensor_task = Process(target=ft_Sensor_run, args=())
-   
+    ft_sensor_task = Process(target=ft_sensor_run, args=())
     try:
-        xarm6_cmd_task.start()
+        #xarm6_cmd_task.start()
         ft_sensor_task.start()
 
-        xarm6_cmd_task.join()
+        #xarm6_cmd_task.join()
         ft_sensor_task.join()
 
     except KeyboardInterrupt:
+        ch = setUpChannel(channel=0)
+        frame = Frame(
+            id_=0x64,
+            data=[0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            dlc=8
+        )
+        ch.write(frame)
         xarm6_cmd_task.terminate()
-        ft_sensor_task.join()
+        ft_sensor_task.terminate()
