@@ -9,6 +9,8 @@ import can
 import numpy as np
 import matplotlib.pyplot as plt
 import modern_robotics as mr
+from tasho import robot as rob
+import tf
 
 from multiprocessing import Process, Manager
 
@@ -17,6 +19,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
 from xarm.wrapper import XArmAPI
 
+n_dof = 6
+xarm6_mode = 2 #4 #       2: teaching mode, 4: joint velocity control
 
 #######################################################
 """
@@ -52,7 +56,6 @@ _q['trq_ext'] = [0.0]*6;
 _q_d['qd'] = [0.0]*9; _q_d['qd_dot'] = [0.0]*9; _q_d['qd_ddot'] = [0.0]*9;
 _F['force'] = [0.0]*3; _F['torque'] = [0.0]*3;
 
-000
 
 def ft_sensor_run():
     init_time=time.time()
@@ -108,17 +111,20 @@ def xarm6_cmd_run():
     rad2deg = 180/3.141592
     xarm6_frq = 250
     
-    xarm6_mode = 4 #2 #       2: teaching mode, 4: joint velocity control
+    robot_choice = 'xarm6'
+    robot = rob.Robot(robot_choice)
+    
+    
 
     init_time=time.time()
     
-    qd=[0]*6
-    qd_dot=[0]*6
-    qd_ddot=[0]*6
-    cmd_vel=[0]*6
+    qd=[0]*n_dof
+    qd_dot=[0]*n_dof
+    qd_ddot=[0]*n_dof
+    cmd_vel=[0]*n_dof
     
     Js_dot = np.zeros((6*6,6))
-    qint_error=np.zeros((6,1))
+    qint_error=np.zeros((n_dof,1))
 
     arm = XArmAPI(ip)
     arm.motion_enable(enable=True)
@@ -133,10 +139,10 @@ def xarm6_cmd_run():
     time.sleep(1)
     
     ### Define for trajectory
-    traj = Trajectory(6)
-    traj_flag = [0]*6
+    traj = Trajectory(n_dof)
+    traj_flag = [0]*n_dof
     motion = 1
-    target_q = [0]*6
+    target_q = [0]*n_dof
     
     #"""
     ### xarm6 Kinematic parameters based on URDF file for MR
@@ -185,7 +191,9 @@ def xarm6_cmd_run():
         q_rad = [readdata[0][0]*deg2rad,readdata[0][1]*deg2rad,readdata[0][2]*deg2rad,readdata[0][3]*deg2rad,readdata[0][4]*deg2rad,readdata[0][5]*deg2rad]
         q_dot_rad = [readdata[1][0]*deg2rad,readdata[1][1]*deg2rad,readdata[1][2]*deg2rad,readdata[1][3]*deg2rad,readdata[1][4]*deg2rad,readdata[1][5]*deg2rad]
         
-
+        T=np.array(robot.fk(q_rad)[n_dof])
+        print(T)
+        print(tf.transformations.euler_from_matrix(T))
         #"""
         T=T_0
         for i in range(len(q)-1,-1,-1):
