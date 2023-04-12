@@ -10,6 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import modern_robotics as mr
 from tasho import robot as rob
+from tasho import world_simulator
+import pybullet as p
+
+import casadi as cs
 import tf
 
 from multiprocessing import Process, Manager
@@ -19,9 +23,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
 from xarm.wrapper import XArmAPI
 
-n_dof = 6
-xarm6_mode = 2 #4 #       2: teaching mode, 4: joint velocity control
+Simulation = True
 
+n_dof = 6
+xarm6_mode = 2 #4 #                               2: teaching mode, 4: joint velocity control
+control_mode = 0 #1 #2 #3                         0: PI velocity, 1: Gravity, 2: IDC 3: FDCC
 #######################################################
 """
 Just for test example
@@ -60,8 +66,13 @@ _F['force'] = [0.0]*3; _F['torque'] = [0.0]*3;
 def ft_sensor_run():
     init_time=time.time()
     DF=50; DT=2000
-    RFT_frq=1000
+    RFT_frq=500
     channel = 0
+    
+    frq_cutoff = 5
+    alpha = (frq_cutoff*(1/RFT_frq))/(1+frq_cutoff*(1/RFT_frq))
+    F_ext_buf = np.array([0.0]*6)
+    F_ext_off = np.array([0.0]*6) 
     
     bus = can.interface.Bus(bustype = 'kvaser', channel = 0, bitrate = 1000000)
 
@@ -97,8 +108,13 @@ def ft_sensor_run():
         signed_ty = (-(ty & 0x8000) | (ty&0x7fff))/DT
         signed_tz = (-(tz & 0x8000) | (tz&0x7fff))/DT
         
-        _F['force'] = [signed_fx, signed_fy, signed_fz]
-        _F['torque'] = [signed_tx, signed_ty, signed_tz]
+        
+        F_ext_tmp = np.array([signed_fx, signed_fy, signed_fz]+[signed_tx, signed_ty, signed_tz])
+        F_ext = alpha*(F_ext_tmp-F_ext_off)+(1-alpha)*F_ext_buf
+        F_ext_buf = F_ext
+        
+        _F['force'] = [F_ext[0], F_ext[1], F_ext[2]]
+        _F['torque'] = [F_ext[3], F_ext[4], F_ext[5]]
         
         while time.time()-g_time<(1/RFT_frq):
             time.sleep(1/1000000)
@@ -114,14 +130,16 @@ def xarm6_cmd_run():
     robot_choice = 'xarm6'
     robot = rob.Robot(robot_choice)
     
-    
+    jac_fun = robot.set_kinematic_jacobian(name="jac_fun",q=6,frame='space')
 
+    
+    
     init_time=time.time()
     
-    qd=[0]*n_dof
-    qd_dot=[0]*n_dof
-    qd_ddot=[0]*n_dof
-    cmd_vel=[0]*n_dof
+    qd=np.array([0.0]*n_dof)
+    qd_dot=np.array([0.0]*n_dof)
+    qd_ddot=np.array([0.0]*n_dof)
+    cmd_vel=np.array([0.0]*n_dof)
     
     Js_dot = np.zeros((6*6,6))
     qint_error=np.zeros((n_dof,1))
@@ -142,12 +160,12 @@ def xarm6_cmd_run():
     traj = Trajectory(n_dof)
     traj_flag = [0]*n_dof
     motion = 1
-    target_q = [0]*n_dof
+    target_q = np.array([0.0]*n_dof)
     
     #"""
     ### xarm6 Kinematic parameters based on URDF file for MR
     link_01 = np.array([0, 0, 0.267]); link_12 = np.array([0, 0, 0]); link_23 = np.array([0.0535, 0, 0.2845]);
-    link_34 = np.array([0.0775, 0, -0.3425]); link_45 = np.array([0, 0, 0]); link_56 = np.array([0.076, 0, -0.097]); link_6E = np.array([0.0, 0, 0.0])
+    link_34 = np.array([0.0775, 0, -0.3425]); link_45 = np.array([0, 0, 0]); link_56 = np.array([0.076, 0, -0.097]); link_6E = np.array([0.0, 0, -0.0045])
     w=np.array([[0,0,1],[0,1,0],[0,1,0],[0,0,-1],[0,1,0],[0,0,-1]])
     L_=np.array([(link_01+link_12)[:], (link_01+link_12+link_23)[:],(link_01+link_12+link_23+link_34)[:],(link_01+link_12+link_23+link_34+link_45)[:]\
     ,(link_01+link_12+link_23+link_34+link_45+link_56)[:],(link_01+link_12+link_23+link_34+link_45+link_56+link_6E)[:]])
@@ -169,15 +187,14 @@ def xarm6_cmd_run():
     V_d = np.array([0,0,0,0,0,0])
     X_d = np.array([350,361,280,45,-10,0])
     
-    frq_cutoff = 50
-    alpha = (frq_cutoff*(1/xarm6_frq))/(1+frq_cutoff*(1/xarm6_frq))
-    F_ext_buf = np.array([0]*6)
-    F_ext_off = np.array([0]*6)    
+       
+    tau_buf = np.array([0.0]*6)
     #"""
 
     readdata=arm.get_joint_states()[1]
     init_pos = [readdata[0][0],readdata[0][1],readdata[0][2],readdata[0][3],readdata[0][4],readdata[0][5]]
     print(init_pos)
+    q_buf=np.array([0.0]*6)
 
     
     
@@ -186,67 +203,76 @@ def xarm6_cmd_run():
         g_time = time.time()
         readdata=arm.get_joint_states()[1]
 
-        q = [readdata[0][0],readdata[0][1],readdata[0][2],readdata[0][3],readdata[0][4],readdata[0][5]]
-        q_dot = [readdata[1][0],readdata[1][1],readdata[1][2],readdata[1][3],readdata[1][4],readdata[1][5]]
-        q_rad = [readdata[0][0]*deg2rad,readdata[0][1]*deg2rad,readdata[0][2]*deg2rad,readdata[0][3]*deg2rad,readdata[0][4]*deg2rad,readdata[0][5]*deg2rad]
-        q_dot_rad = [readdata[1][0]*deg2rad,readdata[1][1]*deg2rad,readdata[1][2]*deg2rad,readdata[1][3]*deg2rad,readdata[1][4]*deg2rad,readdata[1][5]*deg2rad]
+        #q = [readdata[0][0],readdata[0][1],readdata[0][2],readdata[0][3],readdata[0][4],readdata[0][5]]
+        #q_dot = [readdata[1][0],readdata[1][1],readdata[1][2],readdata[1][3],readdata[1][4],readdata[1][5]]
+        q = np.array([readdata[0][0]*deg2rad,readdata[0][1]*deg2rad,readdata[0][2]*deg2rad,readdata[0][3]*deg2rad,readdata[0][4]*deg2rad,readdata[0][5]*deg2rad])
+        q_dot = np.array([readdata[1][0]*deg2rad,readdata[1][1]*deg2rad,readdata[1][2]*deg2rad,readdata[1][3]*deg2rad,readdata[1][4]*deg2rad,readdata[1][5]*deg2rad])
+        tau = np.array(arm.joints_torque[0:6])
+        #print(q)
+        #print(tau)
+        T=np.array(robot.fk(q)[n_dof])
         
-        T=np.array(robot.fk(q_rad)[n_dof])
-        print(T)
-        print(tf.transformations.euler_from_matrix(T))
-        #"""
+        #print(tf.transformations.euler_from_matrix(T))
+        """
         T=T_0
         for i in range(len(q)-1,-1,-1):
-            T=np.dot(mr.MatrixExp6(mr.VecTose3(Slist[:,i]*np.array(q_rad[i]))),T)
-
-        J_b_mr[0:3,:] = mr.JacobianBody(Blist,q_rad)[3:6]
-        J_b_mr[3:6,:] = mr.JacobianBody(Blist,q_rad)[0:3]
-        #J_s_mr[0:3,:] = mr.JacobianSpace(Slist,q_rad)[3:6]
-        #J_s_mr[3:6,:] = mr.JacobianSpace(Slist,q_rad)[0:3]
-
+            T=np.dot(mr.MatrixExp6(mr.VecTose3(Slist[:,i]*np.array(q[i]))),T)
+        """
+        jac, jac_rot=jac_fun(q)
+        J_geo = cs.vertcat(jac,jac_rot)
+        print(J_geo)
+        
+        J_b = mr.JacobianBody(Blist,q)
+        J_s = mr.JacobianSpace(Slist,q)
+        J_b_mr[0:3,:] = J_b[3:6]
+        J_b_mr[3:6,:] = J_b[0:3]
+        J_s_mr[0:3,:] = J_s[3:6]
+        J_s_mr[3:6,:] = J_s[0:3]
+        
+        print(J_b_mr)
         #for i in range(0,6):
         #    for j in range(0,6):
         #        Js_dot[6*i:6*i+6,j] = mr.ad(J_s_mr[:,i])@J_s_mr[:,j]
 
+        
+        M_=robot.M(q).full().reshape(len(q),len(q))
+        C_=robot.C(q,q_dot).full().reshape(len(q),len(q))
+        G_=robot.G(q).full().reshape(len(q))
+        
+        #print(M_)
+        #print(C_)
         #print(T)
-        F_=np.array([[5,0,0,0,0,0],[0,5,0,0,0,0],[0,0,5,0,0,0],[0,0,0,25,0,0],[0,0,0,0,25,0],[0,0,0,0,0,25]])
-        F_ext_tmp = np.transpose(np.dot(F_,np.transpose(np.array([_F['force']+_F['torque']]))))
-        F_ext = alpha*(F_ext_tmp-F_ext_off)+(1-alpha)*F_ext_buf
-        F_ext_buf = F_ext
+
+        F_ext = np.array([_F['force']+_F['torque']])
         tau_ext = np.transpose(J_b_mr)@np.transpose(F_ext)
-        print(tau_ext)
+        #print(tau_ext)
+        
         #"""
         if motion==1 and traj_flag[-1]==0:
-            #target_q=[0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad]
-            target_q=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            #target_q=np.array([0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad, 0.0*deg2rad])
+            target_q=np.array([0.0*deg2rad, -60.0*deg2rad, -30.0*deg2rad, 0.0*deg2rad, 90.0*deg2rad, 0.0*deg2rad])
             motion+=1
             traj_flag=[1]*6
         elif motion==2 and traj_flag[-1]==0:
-            #target_q=[-10.0*deg2rad, -10.0*deg2rad, 20.0*deg2rad, -30.0*deg2rad, 10.0*deg2rad, 20.0*deg2rad]
-            target_q=[0.0, -60.0, -30.0, 0.0, 90.0, 0.0]
+            target_q=np.array([0.0*deg2rad, -60.0*deg2rad, -30.0*deg2rad, 0.0*deg2rad, 90.0*deg2rad, 0.0*deg2rad])
             motion+=1
             traj_flag=[1]*6
         elif motion==3 and traj_flag[-1]==0:
-            #target_q=[-25.0*deg2rad, 0.0*deg2rad, 10.0*deg2rad, -50.0*deg2rad, 20.0*deg2rad, 40.0*deg2rad]
-            target_q=[-90.0, -60.0, -30.0, 0.0, 90.0, 0.0]
+            target_q=np.array([-90.0*deg2rad, -60.0*deg2rad, -30.0*deg2rad, 0.0*deg2rad, 90.0*deg2rad, 0.0*deg2rad])
             motion+=1
             traj_flag=[1]*6
         elif motion==4 and traj_flag[-1]==0:
-            #target_q=[-50.0*deg2rad, 50.0*deg2rad, 50.0*deg2rad, 50.0*deg2rad, 50.0*deg2rad, 50.0*deg2rad]
-            target_q=[0.0, -60.0, -30.0, 0.0, 90.0, 0.0]
+            target_q=np.array([0.0*deg2rad, -60.0*deg2rad, -30.0*deg2rad, 0.0*deg2rad, 90.0*deg2rad, 0.0*deg2rad])
             motion+=1
             traj_flag=[1]*6
         elif motion==5 and traj_flag[-1]==0:
-            #target_q=[-30.0*deg2rad, 10.0*deg2rad, 30.0*deg2rad, -20.0*deg2rad, 10.0*deg2rad, 60.0*deg2rad]
-            target_q=[0.0, 90.0, -150.0, 80.0, -80.0, 0.0]
+            target_q=np.array([0.0*deg2rad, 90.0*deg2rad, -150.0*deg2rad, 80.0*deg2rad, -80.0*deg2rad, 0.0*deg2rad])
             motion+=1
             traj_flag=[1]*6
         elif motion==6 and traj_flag[-1]==0:
-            #target_q=[-20.0*deg2rad, 20.0*deg2rad, 40.0*deg2rad, 20.0*deg2rad, 0.0*deg2rad, 90.0*deg2rad]
-            target_q=[90.0, -60.0, -30.0, -80.0, 90.0, 0.0]
+            target_q=np.array([90.0*deg2rad, -60.0*deg2rad, -30.0*deg2rad, -80.0*deg2rad, 90.0*deg2rad, 0.0*deg2rad])
             motion=1
             traj_flag=[1]*6
-        
             
         for i in range(6):
             if traj_flag[i]==1:
@@ -261,36 +287,55 @@ def xarm6_cmd_run():
                 qd_ddot[i] = tmp_res[2]
 
                 if tmp_flag == 0:
-                    if motion == 3:
-                        traj_flag[i]=-1
-                    else:
+                    if motion == 2:
                         traj_flag[i]=0
+                    else:
+                        traj_flag[i]=0            
+        if control_mode == 0: #PI-velocity
+            cmd_vel = np.dot(np.diag([8,8,8,5,5,5]),qd-q)+np.dot(np.diag([0.08,0.08,0.08,0.05,0.05,0.05]),qd_dot-q_dot)+np.transpose(tau_ext)[0]
 
-        for i in range(6):
-            if i == 0:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-            elif i == 1:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-            elif i == 2:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-            elif i == 3:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-            elif i == 4:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-            elif i == 5:
-                cmd_vel[i] = 10*(qd[i]-q[i])+0.1*(qd_dot[i]-q_dot[i])+1*tau_ext[i]
-                #cmd_vel[i] = 0.65*tau_ext[i]
-        #print(qd)
-        #print(q)
-        #print(cmd_vel)
+        elif control_mode == 1: #Gravity
+            print("gravity= ",G_)
+            print("position= ",q)
+            print("velocity= ",q_dot)
+            print("actual= ",tau)
+            print('\n\n')
+            
+            cmd_vel = G_-tau+np.transpose(tau_ext)[0]
+            #cmd_vel = np.transpose(tau_ext)[0]
+            
+        elif control_mode == 2: #IDC based
+            """
+            q_buf=q_buf+1/xarm6_frq*(np.array(qd)-np.array(q))
+            u_0 = np.dot(np.diag([8,8,8,5,5,5]),(np.array(qd)-np.array(q)))+np.dot(np.diag([0.08,0.08,0.08,0.05,0.05,0.05]),(np.array(qd_dot)-np.array(q_dot)))\
+                  +np.dot(np.diag([20,20,20,10,10,10]),q_buf)
+            tau_d = np.dot(M_,u_0)+np.dot(C_,q_dot)+np.array(G_)#+np.transpose(tau_ext)[0]
+            tau_buf=tau_buf+1/xarm6_frq*(tau_d-tau)
+            cmd_vel = np.dot(np.diag([10,10,10,2,2,2]),(tau_d-tau))+np.dot(np.diag([100,100,100,20,20,20]),(tau_buf))
+            print(cmd_vel)
+            """
+            q_buf=q_buf+1/xarm6_frq*(np.array(qd)-np.array(q))
+            u_0 = np.dot(np.diag([12,12,12,7.5,10,7.5]),(np.array(qd)-np.array(q)))+np.dot(np.diag([0.12,0.12,0.12,0.075,0.01,0.075]),(np.array(qd_dot)-np.array(q_dot)))#\
+                  #+np.dot(np.diag([30,30,30,15,15,15]),q_buf)
+            tau_d = np.dot(M_,u_0)+np.dot(C_,q_dot)#+np.transpose(tau_ext)[0]#+np.array(G_)#
+            tau_buf=tau_buf+1/xarm6_frq*(tau_d)
+            #cmd_vel = (0.03*(tau_d-tau)+0.3*(tau_buf))*rad2deg
+            cmd_vel = np.dot(np.diag([1,1,1,0.2,0.7,0.2]),(tau_d))#+np.dot(np.diag([10,10,10,2,7,2]),(tau_buf))
+            #tau_buf = tau_d-tau
+            #q_buf = np.array(qd)-np.array(q))
+            print(cmd_vel)
+            #"""
+        
+        elif control_mode == 3: # FDCC
+           
+           
+           
+           pass
         
         if xarm6_mode == 4:
-            arm.vc_set_joint_velocity(cmd_vel)
+            arm.vc_set_joint_velocity(cmd_vel*rad2deg)
+            #print(cmd_vel)
+            pass
 
         
         while time.time()-g_time<(1/xarm6_frq):
@@ -321,3 +366,4 @@ if __name__=='__main__':
         ch.write(frame)
         xarm6_cmd_task.terminate()
         ft_sensor_task.terminate()
+        print("job done")
