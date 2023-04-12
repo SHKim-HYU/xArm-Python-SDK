@@ -5,7 +5,6 @@ from trajectory_generate import Trajectory
 import time
 import os
 import sys
-import can
 import numpy as np
 import matplotlib.pyplot as plt
 import modern_robotics as mr
@@ -63,64 +62,6 @@ _q_d['qd'] = [0.0]*9; _q_d['qd_dot'] = [0.0]*9; _q_d['qd_ddot'] = [0.0]*9;
 _F['force'] = [0.0]*3; _F['torque'] = [0.0]*3;
 
 
-def ft_sensor_run():
-    init_time=time.time()
-    DF=50; DT=2000
-    RFT_frq=500
-    channel = 0
-    
-    frq_cutoff = 5
-    alpha = (frq_cutoff*(1/RFT_frq))/(1+frq_cutoff*(1/RFT_frq))
-    F_ext_buf = np.array([0.0]*6)
-    F_ext_off = np.array([0.0]*6) 
-    
-    bus = can.interface.Bus(bustype = 'kvaser', channel = 0, bitrate = 1000000)
-
-    # Set filter
-    tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x08, 0x01, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01])
-    bus.send(tx_message, timeout = 0.5)
-    bus.recv()
-
-    tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x11, 0x01, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01])
-    bus.send(tx_message, timeout = 0.5)
-    bus.recv()
-    
-    while True:
-        g_time = time.time()
-        # read once
-        tx_message = can.Message(arbitration_id = 0x64, is_extended_id = False, data = [0x0A, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01])
-        bus.send(tx_message, timeout = 0.5)
-
-        rx_message_1 = bus.recv()
-        rx_message_2 = bus.recv()
-
-        fx = ((rx_message_1.data[1]<<8) + rx_message_1.data[2])
-        fy = ((rx_message_1.data[3]<<8) + rx_message_1.data[4])
-        fz = ((rx_message_1.data[5]<<8) + rx_message_1.data[6])
-        signed_fx = (-(fx & 0x8000) | (fx&0x7fff))/DF
-        signed_fy = (-(fy & 0x8000) | (fy&0x7fff))/DF
-        signed_fz = (-(fz & 0x8000) | (fz&0x7fff))/DF
-        
-        tx = ((rx_message_1.data[7]<<8) + rx_message_2.data[0])
-        ty = ((rx_message_2.data[1]<<8) + rx_message_2.data[2])
-        tz = ((rx_message_2.data[3]<<8) + rx_message_2.data[4])
-        signed_tx = (-(tx & 0x8000) | (tx&0x7fff))/DT
-        signed_ty = (-(ty & 0x8000) | (ty&0x7fff))/DT
-        signed_tz = (-(tz & 0x8000) | (tz&0x7fff))/DT
-        
-        
-        F_ext_tmp = np.array([signed_fx, signed_fy, signed_fz]+[signed_tx, signed_ty, signed_tz])
-        F_ext = alpha*(F_ext_tmp-F_ext_off)+(1-alpha)*F_ext_buf
-        F_ext_buf = F_ext
-        
-        _F['force'] = [F_ext[0], F_ext[1], F_ext[2]]
-        _F['torque'] = [F_ext[3], F_ext[4], F_ext[5]]
-        
-        while time.time()-g_time<(1/RFT_frq):
-            time.sleep(1/1000000)
-            glob_time_buf=time.time()
-            init_time_buf=init_time
-        #print(time.time()-g_time)
 
 def xarm6_cmd_run():
     deg2rad = 3.141592/180
@@ -211,17 +152,25 @@ def xarm6_cmd_run():
         #print(q)
         #print(tau)
         T=np.array(robot.fk(q)[n_dof])
-
-        #J_s = robot.J_s(q)
+        
+        #print(tf.transformations.euler_from_matrix(T))
+        """
+        T=T_0
+        for i in range(len(q)-1,-1,-1):
+            T=np.dot(mr.MatrixExp6(mr.VecTose3(Slist[:,i]*np.array(q[i]))),T)
+        """
+        
+        J_s = robot.J_s(q)
         J_b = robot.J_b(q)
         
         #print(J_s)
         print(J_b)
-
+        
+        
         #for i in range(0,6):
         #    for j in range(0,6):
         #        Js_dot[6*i:6*i+6,j] = mr.ad(J_s_mr[:,i])@J_s_mr[:,j]
-
+        
         
         M_=robot.M(q).full().reshape(len(q),len(q))
         C_=robot.C(q,q_dot).full().reshape(len(q),len(q))
@@ -335,23 +284,13 @@ def xarm6_cmd_run():
 if __name__=='__main__':
 
     xarm6_cmd_task = Process(target=xarm6_cmd_run, args=())
-    ft_sensor_task = Process(target=ft_sensor_run, args=())
-   
+    
     try:
         xarm6_cmd_task.start()
-        ft_sensor_task.start()
-
+       
         xarm6_cmd_task.join()
-        ft_sensor_task.join()
-
+        
     except KeyboardInterrupt:
-        ch = setUpChannel(channel=0)
-        frame = Frame(
-            id_=0x64,
-            data=[0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-            dlc=8
-        )
-        ch.write(frame)
+
         xarm6_cmd_task.terminate()
-        ft_sensor_task.terminate()
         print("job done")
